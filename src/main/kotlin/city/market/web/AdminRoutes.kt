@@ -55,7 +55,11 @@ fun Route.adminRoutes() {
                                     td { r.seal?.let { a(href = "/uploads/$it", target = "_blank") { +"查看" } } ?: +"—" }
                                     td { badge(if (r.online) "在线" else "离线", if (r.online) "b-green" else "b-red") }
                                     td { badge(Labels.scale(r.status), statusBadgeClass(r.status)) }
-                                    td { a(href = "/reg/scales/${r.id}") { +"监管档案" } }
+                                    td {
+                                        a(href = "/reg/scales/${r.id}") { +"监管档案" }
+                                        +" "
+                                        a(href = "/scales/${r.id}/offline-sync") { +"离线补传" }
+                                    }
                                 }
                             }
                         }

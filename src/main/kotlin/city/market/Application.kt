@@ -58,6 +58,7 @@ fun Application.module() {
         regulatorRoutes()
         vendorRoutes()
         reportRoutes()
+        offlineRoutes()
     }
 }
 

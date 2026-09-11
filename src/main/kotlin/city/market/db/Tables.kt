@@ -61,6 +61,35 @@ object Transactions : Table("transactions") {
     val weightG = integer("weight_g")
     val amountYuan = decimal("amount", 10, 2)
     val offline = bool("offline").default(false) // 离线补传交易
+    val syncBatchId = integer("sync_batch_id").nullable()  // 补传批次号
+    val trust = varchar("trust", 20).default("NORMAL")     // NORMAL/TRUSTED/PENDING_REVIEW/REVIEWED_OK/SUSPICIOUS
+    val trustFlags = varchar("trust_flags", 255).nullable() // 可信度标记，逗号分隔
+    override val primaryKey = PrimaryKey(id)
+}
+
+// ---------- 离线交易补传批次 ----------
+object OfflineSyncs : Table("offline_syncs") {
+    val id = integer("id").autoIncrement()
+    val scaleId = integer("scale_id").references(Scales.id)
+    val stallId = integer("stall_id").references(Stalls.id)
+    val uploadedBy = integer("uploaded_by").references(Users.id)
+    val offlineStart = datetime("offline_start")       // 离线开始
+    val offlineEnd = datetime("offline_end")           // 恢复网络时间
+    val deviceClock = datetime("device_clock").nullable() // 设备本地时钟读数
+    val clockDriftMin = integer("clock_drift_min").default(0) // 与服务器时间漂移（分钟）
+    val sealAtSync = varchar("seal_at_sync", 20).default("INTACT") // 补传时封签状态
+    val txUploaded = integer("tx_uploaded").default(0)      // 上传笔数
+    val txAccepted = integer("tx_accepted").default(0)      // 入库笔数
+    val txDuplicate = integer("tx_duplicate").default(0)    // 与服务器已有流水重复
+    val txInvalid = integer("tx_invalid").default(0)        // 时间不在离线窗口内
+    val txReevaluated = integer("tx_reevaluated").default(0) // 窗口内重估总笔数
+    val pendingReview = integer("pending_review").default(0) // 进入人工复核笔数
+    val peakRatio = integer("peak_ratio").default(0)         // 离线窗口高峰期占比 %
+    val anomalies = varchar("anomalies", 500).default("")    // PEAK_CONCENTRATED/CLOCK_DRIFT/SEAL_BROKEN/BINDING_CHANGED
+    val complaintsInWindow = integer("complaints_in_window").default(0) // 离线期间投诉数
+    val needReinspection = bool("need_reinspection").default(false)   // 是否建议补做抽检
+    val status = varchar("status", 20).default("SYNCED")     // SYNCED / REVIEWED / FLAGGED
+    val createdAt = datetime("created_at")
     override val primaryKey = PrimaryKey(id)
 }
 
@@ -203,7 +232,7 @@ object SealChanges : Table("seal_changes") {
 }
 
 val allTables = arrayOf(
-    Users, Markets, Stalls, Scales, Transactions, InspectionTasks, Inspections,
+    Users, Markets, Stalls, Scales, Transactions, OfflineSyncs, InspectionTasks, Inspections,
     Complaints, Penalties, Appeals, Rectifications, FollowUps, Disclosures,
     ScaleEvents, SealChanges
 )

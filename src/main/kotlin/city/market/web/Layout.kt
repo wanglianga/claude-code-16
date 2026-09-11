@@ -48,7 +48,9 @@ object Labels {
         "SUSPENDED" to "设备停用", "REACTIVATED" to "恢复使用", "COMPLAINT_VERIFIED" to "投诉属实",
         "PENALTY_ISSUED" to "处罚开出", "PENALTY_CONFIRMED" to "处罚确认", "RECTIFICATION" to "提交整改",
         "REINSPECT_PASS" to "复检通过", "SEAL_CHANGED" to "封签更换", "FOLLOW_UP" to "投诉回访",
-        "OFFLINE" to "设备离线", "ONLINE" to "恢复联网"
+        "OFFLINE" to "设备离线", "ONLINE" to "恢复联网",
+        "OFFLINE_SYNC" to "离线补传", "OFFLINE_ANOMALY" to "离线异常",
+        "MANUAL_REVIEW" to "人工复核", "REINSPECT_SUGGESTED" to "建议补做抽检"
     )[s] ?: s
 }
 
@@ -118,6 +120,7 @@ fun HTML.page(title: String, session: UserSession?, content: DIV.() -> Unit) {
                         a(href = "/reg/tasks") { +"抽检任务" }
                         a(href = "/reg/complaints") { +"投诉核验" }
                         a(href = "/reg/penalties") { +"处罚管理" }
+                        a(href = "/reg/offline") { +"离线复核" }
                         a(href = "/reg/disclosures") { +"公示管理" }
                         a(href = "/reg/reports/tracking") { +"变化追踪" }
                         a(href = "/reg/reports/annual") { +"年度治理" }

@@ -27,7 +27,11 @@ object Db {
         uploadDir = env("UPLOAD_DIR", "uploads")
         File(uploadDir).mkdirs()
 
-        transaction { SchemaUtils.create(*allTables) }
+        transaction {
+            SchemaUtils.create(*allTables)
+            // 轻量迁移：为已存在的表补充新增列（如 transactions 的补传字段）
+            SchemaUtils.addMissingColumnsStatements(*allTables).forEach { exec(it) }
+        }
         if (env("SEED_DEMO", "true") == "true") seedIfEmpty()
     }
 

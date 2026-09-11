@@ -38,7 +38,10 @@ fun Route.regulatorRoutes() {
                     "pendingComplaints" to Complaints.selectAll().where { Complaints.status eq "SUBMITTED" }.count(),
                     "issuedPenalties" to Penalties.selectAll().where { Penalties.status inList listOf("ISSUED", "APPEALING") }.count(),
                     "pendingAppeals" to Appeals.selectAll().where { Appeals.status eq "PENDING" }.count(),
-                    "rectifying" to Penalties.selectAll().where { Penalties.status eq "RECTIFYING" }.count()
+                    "rectifying" to Penalties.selectAll().where { Penalties.status eq "RECTIFYING" }.count(),
+                    "offlineReview" to OfflineSyncs.selectAll().where {
+                        (OfflineSyncs.status eq "SYNCED") and (OfflineSyncs.pendingReview greater 0)
+                    }.count()
                 )
             }
             val markets = transaction {
@@ -56,6 +59,7 @@ fun Route.regulatorRoutes() {
                         statCard("待确认处罚", "${stats["issuedPenalties"]}", stats["issuedPenalties"]!! > 0)
                         statCard("待处理申诉", "${stats["pendingAppeals"]}", stats["pendingAppeals"]!! > 0)
                         statCard("整改中", "${stats["rectifying"]}")
+                        statCard("待复核补传", "${stats["offlineReview"]}", stats["offlineReview"]!! > 0)
                     }
                     div("card") {
                         h2 { +"市场信用与抽检频次" }

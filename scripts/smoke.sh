@@ -87,7 +87,48 @@ curl -s -b $J-reg "$BASE/reg/reports/annual?year=2026" -o /tmp/t.html; check "�
 curl -s "$BASE/disclosures" -o /tmp/t.html; check "公示栏(免登录)" /tmp/t.html "公示"
 curl -s "$BASE/health" -o /tmp/t.html; check "健康检查" /tmp/t.html '"db":true'
 
-echo "== 8. 权限边界 =="
+echo "== 8. 离线交易补传 =="
+Y=$(date -d 'yesterday' +%F)
+# 8.1 离线窗口内先产生一起投诉（摊位 A-03=stallId 3，DEV-0003 离线）
+curl -s -b $J-c1 -X POST "$BASE/consumer/complaints/new" \
+  -F stallId=3 -F purchaseTime="${Y}T08:20" -F product=西红柿 -F nominalWeightG=1000 -F reweighedWeightG=950 \
+  -F paymentRef=WX-OFFLINE-1 -o /dev/null -w "%{http_code}\n" | grep -q 302 && ok "离线期间投诉" || bad "离线期间投诉"
+# 8.2 本摊位摊主可访问补传表单
+curl -s -c $J-v3 -b $J-v3 -o /dev/null -X POST "$BASE/login" --data-urlencode "username=vendor3" --data-urlencode "password=vendor123"
+curl -s -b $J-v3 "$BASE/scales/3/offline-sync" -o /tmp/t.html; check "摊主补传表单" /tmp/t.html "本地流水"
+# 8.3 提交补传：窗口集中在早高峰 07:00-09:30，设备时钟拨快 45 分钟
+LOC=$(curl -s -b $J-v3 -D - -o /dev/null -X POST "$BASE/scales/3/offline-sync" \
+  --data-urlencode "offlineStart=${Y}T07:00" \
+  --data-urlencode "offlineEnd=${Y}T09:30" \
+  --data-urlencode "deviceClock=$(date -d '+45 min' +%FT%H:%M)" \
+  --data-urlencode "sealAtSync=INTACT" \
+  --data-urlencode "csv=${Y} 07:15,1250,45.00
+${Y} 07:42,860,30.96
+${Y} 08:10,2100,75.60
+${Y} 08:47,640,23.04
+${Y} 09:12,1500,54.00" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+BID=$(echo "$LOC" | grep -o '[0-9]*$')
+[ -n "$BID" ] && ok "补传提交(批次#$BID)" || bad "补传提交"
+# 8.4 批次详情：异常标记 + 人工复核 + 补做抽检提示
+curl -s -b $J-reg "$BASE$LOC" -o /tmp/batch.html
+check "高峰期异常集中标记" /tmp/batch.html "高峰期离线集中"
+check "时钟漂移标记" /tmp/batch.html "设备时钟漂移"
+check "交易进入人工复核" /tmp/batch.html "待人工复核"
+check "建议补做抽检提示" /tmp/batch.html "补做抽检"
+# 8.5 重点巡检任务生成
+curl -s -b $J-reg "$BASE/reg/tasks" -o /tmp/t.html; check "重点巡检任务" /tmp/t.html "重点巡检"
+# 8.6 摊位信用扣减（A-03：100 → 95）
+curl -s -b $J-admin "$BASE/admin/stalls" -o /tmp/t.html
+awk 'BEGIN{RS="<tr"} /A-03/ && /95/' /tmp/t.html >/dev/null && ok "摊位信用扣减(95)" || bad "摊位信用扣减"
+# 8.7 监管复核队列 → 复核通过
+curl -s -b $J-reg "$BASE/reg/offline" -o /tmp/off.html; check "复核队列" /tmp/off.html "待复核"
+curl -s -b $J-reg -X POST "$BASE/reg/offline/$BID/review" --data-urlencode "decision=OK" -o /dev/null -w "%{http_code}\n" | grep -q 302 && ok "人工复核通过" || bad "人工复核"
+curl -s -b $J-reg "$BASE$LOC" -o /tmp/batch.html; check "复核后交易状态" /tmp/batch.html "复核通过"
+# 8.8 越权：消费者访问补传表单
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -b $J-c1 "$BASE/scales/3/offline-sync")
+[ "$CODE" = "403" ] && ok "消费者访问补传被拒" || bad "补传越权(code=$CODE)"
+
+echo "== 9. 权限边界 =="
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -b $J-c1 "$BASE/reg/dashboard")
 [ "$CODE" = "403" ] && ok "消费者访问监管页被拒(403)" || bad "越权检查(code=$CODE)"
 CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/reg/dashboard")
