@@ -175,10 +175,10 @@ curl -s -b $J-reg -X POST "$BASE/reg/penalties/$CONF/confirm" -o /dev/null -w "%
 curl -s -b $J-reg "$BASE/reg/responsibility/$RSP" -o /tmp/rsp2.html
 N=$(grep -o '已确认' /tmp/rsp2.html | wc -l)
 [ "$N" -ge 2 ] && ok "拆分处罚均已确认($N 条)" || bad "拆分处罚确认状态($N)"
-# 9.8 公示区分两类问题
+# 9.8 公开公示栏区分两类问题（精确校验 badge 标记，而非标题文字）
 curl -s "$BASE/disclosures" -o /tmp/pub.html
-check "公示:经营行为问题" /tmp/pub.html "经营行为问题"
-check "公示:设备管理问题" /tmp/pub.html "设备管理问题"
+grep -q 'badge b-yellow">设备管理问题</span>' /tmp/pub.html && ok "公开页:设备问题badge" || bad "公开页:设备问题badge"
+grep -q 'badge b-red">经营行为问题</span>' /tmp/pub.html && ok "公开页:经营问题badge" || bad "公开页:经营问题badge"
 check "公示:认定实际经营摊位说明" /tmp/pub.html "实际经营摊位"
 # 9.9 责任认定队列状态 + 秤档案共用排班
 curl -s -b $J-reg "$BASE/reg/responsibility" -o /tmp/t.html; check "责任队列:已认定拆分" /tmp/t.html "已认定拆分"

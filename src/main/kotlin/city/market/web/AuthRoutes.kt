@@ -75,7 +75,8 @@ fun Route.authRoutes() {
                 .map {
                     DisclosureView(
                         it[Disclosures.id], it[Markets.name], it[Disclosures.title],
-                        it[Disclosures.content], it[Disclosures.status], it[Disclosures.publishedAt].toString()
+                        it[Disclosures.content], it[Disclosures.status], it[Disclosures.publishedAt].toString(),
+                        it[Disclosures.kind]
                     )
                 }
         }
