@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-scaleguard}
+      POSTGRES_USER: ${DB_USER:-scaleguard}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-scaleguard}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-scaleguard} -d ${DB_NAME:-scaleguard}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 数据库仅在内部网络访问，不发布到宿主端口
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-scaleguard}
+      DB_USER: ${DB_USER:-scaleguard}
+      DB_PASSWORD: ${DB_PASSWORD:-scaleguard}
+      PORT: "8080"
+      UPLOAD_DIR: /app/uploads
+      SEED_DEMO: ${SEED_DEMO:-true}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me-0123456789abcdef}
+    ports:
+      - "${CC_PUBLISH_PORT}:8080"
+    volumes:
+      - uploads:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  uploads:
