@@ -3,7 +3,10 @@ FROM gradle:8.7-jdk17 AS build
 WORKDIR /home/gradle/src
 COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 COPY src ./src
-RUN gradle --no-daemon shadowJar
+RUN --mount=type=cache,target=/home/gradle/.gradle,uid=1000,gid=1000 \
+    gradle --no-daemon shadowJar \
+    || { sleep 8; gradle --no-daemon shadowJar; } \
+    || { sleep 8; gradle --no-daemon shadowJar; }
 
 # ---------- 运行阶段 ----------
 FROM eclipse-temurin:17-jre-jammy

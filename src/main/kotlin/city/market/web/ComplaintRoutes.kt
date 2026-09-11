@@ -11,6 +11,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.core.*
 import kotlinx.html.*
+import org.jetbrains.exposed.sql.JoinType
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -24,7 +25,9 @@ fun Route.complaintRoutes() {
         get("/complaints") {
             val s = call.requireRole(Roles.CONSUMER) ?: return@get
             val rows = transaction {
-                (Complaints innerJoin Stalls innerJoin Markets).selectAll()
+                Complaints.join(Stalls, JoinType.INNER, Complaints.stallId, Stalls.id)
+                    .join(Markets, JoinType.INNER, Stalls.marketId, Markets.id)
+                    .selectAll()
                     .where { Complaints.consumerId eq s.userId }
                     .orderBy(Complaints.createdAt, SortOrder.DESC).map {
                         ComplaintRow(

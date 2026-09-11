@@ -128,11 +128,80 @@ curl -s -b $J-reg "$BASE$LOC" -o /tmp/batch.html; check "复核后交易状态" 
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -b $J-c1 "$BASE/scales/3/offline-sync")
 [ "$CODE" = "403" ] && ok "消费者访问补传被拒" || bad "补传越权(code=$CODE)"
 
-echo "== 9. 权限边界 =="
+echo "== 9. 多人共用秤责任拆分 =="
+# 9.1 市场管理方：排班与收款码管理页
+curl -s -b $J-admin "$BASE/admin/sharing" -o /tmp/sh.html
+check "共用秤排班页" /tmp/sh.html "早晚市排班"
+check "排班:DEV-0004晚市" /tmp/sh.html "晚市"
+check "收款码前缀登记" /tmp/sh.html "ZFB-S5-"
+# 9.2 消费者就晚市 B-02 禽蛋摊位提交投诉（共用秤 DEV-0004，付款码归属 B-02）
+Y2=$(date -d 'yesterday' +%F)
+curl -s -b $J-c1 -X POST "$BASE/consumer/complaints/new" \
+  -F stallId=5 -F purchaseTime="${Y2}T18:20" -F product=土鸡蛋 -F nominalWeightG=1000 -F reweighedWeightG=910 \
+  -F paymentRef=ZFB-S5-TEST-001 -o /dev/null -w "%{http_code}\n" | grep -q 302 && ok "提交共用秤晚市投诉" || bad "提交共用秤晚市投诉"
+curl -s -b $J-c1 "$BASE/consumer/complaints" -o /tmp/t.html; check "消费者看到共用秤可信度提示" /tmp/t.html "多人共用"
+# 9.3 监管核验：不落直接处罚，生成责任认定单（投诉 id 取自消费者本人列表中「#id 土鸡蛋」标题）
+RCID_RAW=$(curl -s -b $J-c1 "$BASE/consumer/complaints" | grep -oE '#[0-9]+ 土鸡蛋' | head -1 | grep -oE '[0-9]+')
+[ -n "$RCID_RAW" ] && ok "定位待核验共用秤投诉 #$RCID_RAW" || bad "定位待核验共用秤投诉"
+LOC=$(curl -s -b $J-reg -D - -o /dev/null -X POST "$BASE/reg/complaints/$RCID_RAW/verify" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+RSP=$(echo "$LOC" | grep -oE 'responsibility/[0-9]+' | grep -oE '[0-9]+')
+echo "$LOC" | grep -q '/reg/responsibility/' && ok "核验转入责任认定(#$RSP)" || bad "核验转入责任认定($LOC)"
+# 9.4 认定页：五类证据聚合 + 建议实际经营者 B-02 + 备案摊位 B-01
+curl -s -b $J-reg "$BASE/reg/responsibility/$RSP" -o /tmp/rsp.html
+check "证据:付款码" /tmp/rsp.html "付款码"
+check "证据:摊位排班" /tmp/rsp.html "摊位排班"
+check "证据:交易流水" /tmp/rsp.html "交易流水"
+check "证据:商品品类" /tmp/rsp.html "商品品类"
+check "建议实际经营者B-02" /tmp/rsp.html "B-02"
+check "展示设备备案摊位B-01" /tmp/rsp.html "B-01"
+check "认定拆分说明" /tmp/rsp.html "分别生成"
+# 责任明确前投诉为「责任认定中」
+curl -s -b $J-reg "$BASE/reg/complaints" -o /tmp/comp.html
+awk 'BEGIN{RS="<div"} /土鸡蛋/ && /责任认定中/' /tmp/comp.html >/dev/null && ok "责任明确前投诉挂起(责任认定中)" || bad "投诉挂起状态"
+# 9.5 监管认定：实际经营者 B-02(stallId=5)，同时认定设备管理责任，附监控备注
+curl -s -b $J-reg -X POST "$BASE/reg/responsibility/$RSP/decide" \
+  --data-urlencode "operatorStallId=5" --data-urlencode "deviceFault=on" \
+  --data-urlencode "monitorNote=晚市监控显示 18:20 为 B-02 摊位使用 DEV-0004 称重收款" \
+  -o /dev/null -w "%{http_code}\n" | grep -q 302 && ok "提交责任认定拆分" || bad "提交责任认定拆分"
+# 9.6 两条处罚分别记录：经营短斤责任(B-02) + 设备管理责任(B-01)
+curl -s -b $J-reg "$BASE/reg/penalties" -o /tmp/pen.html
+check "经营短斤责任处罚" /tmp/pen.html "经营短斤责任"
+check "设备管理责任处罚" /tmp/pen.html "设备管理责任"
+awk 'BEGIN{RS="<tr"} /设备管理责任/ && /B-01/' /tmp/pen.html >/dev/null && ok "设备责任归备案摊位B-01" || bad "设备责任归属"
+awk 'BEGIN{RS="<tr"} /经营短斤责任/ && /B-02/' /tmp/pen.html >/dev/null && ok "经营责任归实际经营者B-02" || bad "经营责任归属"
+# 9.7 同组一并确认
+CONF=$(grep -o '/reg/penalties/[0-9]*/confirm' /tmp/pen.html | head -1 | grep -o '[0-9]*')
+curl -s -b $J-reg -X POST "$BASE/reg/penalties/$CONF/confirm" -o /dev/null -w "%{http_code}\n" | grep -q 302 && ok "同组处罚整组确认" || bad "同组处罚确认"
+curl -s -b $J-reg "$BASE/reg/responsibility/$RSP" -o /tmp/rsp2.html
+N=$(grep -o '已确认' /tmp/rsp2.html | wc -l)
+[ "$N" -ge 2 ] && ok "拆分处罚均已确认($N 条)" || bad "拆分处罚确认状态($N)"
+# 9.8 公示区分两类问题
+curl -s "$BASE/disclosures" -o /tmp/pub.html
+check "公示:经营行为问题" /tmp/pub.html "经营行为问题"
+check "公示:设备管理问题" /tmp/pub.html "设备管理问题"
+check "公示:认定实际经营摊位说明" /tmp/pub.html "实际经营摊位"
+# 9.9 责任认定队列状态 + 秤档案共用排班
+curl -s -b $J-reg "$BASE/reg/responsibility" -o /tmp/t.html; check "责任队列:已认定拆分" /tmp/t.html "已认定拆分"
+curl -s -b $J-reg "$BASE/reg/scales/4" -o /tmp/arch.html; check "档案:多人共用排班" /tmp/arch.html "多人共用排班"
+check "档案:责任拆分事件" /tmp/arch.html "责任拆分认定"
+# 9.10 经营责任摊位 B-02 摊主可看到经营处罚（vendor2），设备责任不影响其申诉入口以外的视图
+curl -s -b $J-v2 "$BASE/vendor/home" -o /tmp/vh.html; check "摊主看到责任类型标签" /tmp/vh.html "经营短斤责任"
+# 9.11 新增一条相邻摊位排班（登记后自动保持共用标记）
+curl -s -b $J-admin -X POST "$BASE/admin/sharing/schedules/new" \
+  --data-urlencode scaleId=4 --data-urlencode stallId=6 --data-urlencode slot=EVENING \
+  --data-urlencode startHour=18 --data-urlencode endHour=19 -o /dev/null -w "%{http_code}\n" | grep -q 302 \
+  && ok "登记相邻摊位共用排班" || bad "登记共用排班"
+curl -s -b $J-admin "$BASE/admin/sharing" -o /tmp/sh.html; check "新排班入册(B-03)" /tmp/sh.html "B-03"
+
+echo "== 10. 权限边界 =="
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -b $J-c1 "$BASE/reg/dashboard")
 [ "$CODE" = "403" ] && ok "消费者访问监管页被拒(403)" || bad "越权检查(code=$CODE)"
 CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/reg/dashboard")
 [ "$CODE" = "302" ] && ok "未登录跳转登录页" || bad "未登录跳转(code=$CODE)"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -b $J-c1 "$BASE/reg/responsibility")
+[ "$CODE" = "403" ] && ok "消费者访问责任认定被拒(403)" || bad "责任认定越权(code=$CODE)"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -b $J-v2 -X POST "$BASE/admin/sharing/schedules/new" --data "scaleId=4&stallId=6&slot=EVENING&startHour=18&endHour=19")
+[ "$CODE" = "403" ] && ok "摊主不能登记排班(403)" || bad "排班越权(code=$CODE)"
 
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"

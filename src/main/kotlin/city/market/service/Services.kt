@@ -123,21 +123,38 @@ object Trust {
     /** 匹配摊位当前秤与当天交易，评估交易可信度 */
     fun assess(stallId: Int, purchaseTime: LocalDateTime, nominalWeightG: Int, reweighedWeightG: Int): Assessment =
         transaction {
-            val scale = Scales.selectAll().where { Scales.stallId eq stallId }
-                .orderBy(Scales.boundAt, SortOrder.DESC).limit(1).singleOrNull()
+            // 找秤：优先购买时段排班命中该摊位的共用秤；否则取本摊位备案秤
+            val own = Scales.selectAll().where { Scales.stallId eq stallId }
+                .orderBy(Scales.boundAt, SortOrder.DESC).toList()
+            val sharedScaleIds = ScaleSchedules.selectAll().where { ScaleSchedules.stallId eq stallId }
+                .map { it[ScaleSchedules.scaleId] }
+            val shared = if (sharedScaleIds.isEmpty()) emptyList()
+            else Scales.selectAll().where { Scales.id inList sharedScaleIds }.toList()
+            val hour = purchaseTime.hour
+            val covering = (own + shared).filter { sc ->
+                ScaleSchedules.selectAll().where {
+                    (ScaleSchedules.scaleId eq sc[Scales.id]) and (ScaleSchedules.stallId eq stallId) and
+                        (ScaleSchedules.startHour lessEq hour) and (ScaleSchedules.endHour greater hour)
+                }.any()
+            }
+            val scale = covering.firstOrNull() ?: own.firstOrNull() ?: shared.firstOrNull()
             val flags = mutableListOf<String>()
             var matchedTxId: Long? = null
 
             if (scale != null) {
                 val scaleId = scale[Scales.id]
+                // 共用秤排班摊位数 > 1 也视为多人共用
+                val sharedBySchedules = ScaleSchedules.selectAll().where { ScaleSchedules.scaleId eq scaleId }
+                    .map { it[ScaleSchedules.stallId] }.distinct().size > 1
                 // 证书过期（按购买时间判断）
                 if (purchaseTime.toLocalDate().isAfter(scale[Scales.certValidUntil])) flags += "CERT_EXPIRED"
                 // 设备离线
                 if (!scale[Scales.online]) flags += "OFFLINE"
-                // 临时换秤：绑定时间距购买时间不足 SWAP_WINDOW_DAYS
-                if (scale[Scales.boundAt].isAfter(purchaseTime.minusDays(Rules.SWAP_WINDOW_DAYS))) flags += "SCALE_SWAPPED"
+                // 临时换秤：绑定时间距购买时间不足 SWAP_WINDOW_DAYS（仅备案在本摊位的秤参与换秤判定）
+                if (scale[Scales.stallId] == stallId &&
+                    scale[Scales.boundAt].isAfter(purchaseTime.minusDays(Rules.SWAP_WINDOW_DAYS))) flags += "SCALE_SWAPPED"
                 // 多人共用
-                if (scale[Scales.shared]) flags += "SHARED_SCALE"
+                if (scale[Scales.shared] || sharedBySchedules) flags += "SHARED_SCALE"
                 // 匹配当天交易：同秤、同一天、重量与标称接近（±15%），取时间最近一笔
                 val dayStart = purchaseTime.toLocalDate().atStartOfDay()
                 val tx = Transactions.selectAll().where {
@@ -167,15 +184,30 @@ object Trust {
 // 处罚联动：信用、抽检频次、公示
 // ---------------------------------------------------------------------------
 object PenaltyEffects {
-    /** 确认处罚：扣摊位/市场信用、提高抽检频次、生成公示、办结关联投诉 */
+    /**
+     * 确认处罚：扣摊位/市场信用、提高抽检频次、生成公示、办结关联投诉。
+     * 共用秤责任拆分的处罚（同一 splitGroup）一次性整组确认，
+     * 设备管理责任与经营短斤责任分别作用于各自责任摊位、分别发布分类公示。
+     */
     fun confirm(penaltyId: Int) = transaction {
+        val first = Penalties.selectAll().where { Penalties.id eq penaltyId }.single()
+        val group = first[Penalties.splitGroup]
+        val siblings = if (group == null) listOf(first)
+        else Penalties.selectAll().where { Penalties.splitGroup eq group }.toList()
+        // 整组待确认处罚一并确认（已撤销/已确认的跳过）
+        siblings.filter { it[Penalties.status] == "ISSUED" || it[Penalties.status] == "APPEALING" }
+            .forEach { confirmSingle(it[Penalties.id]) }
+    }
+
+    private fun confirmSingle(penaltyId: Int) {
         val p = Penalties.selectAll().where { Penalties.id eq penaltyId }.single()
         val stallId = p[Penalties.stallId]
         val now = LocalDateTime.now()
+        val kind = p[Penalties.kind]
         Penalties.update({ Penalties.id eq penaltyId }) {
             it[status] = "CONFIRMED"; it[confirmedAt] = now
         }
-        // 摊位信用与处罚计数
+        // 摊位信用与处罚计数（设备责任扣备案摊位，经营责任扣实际经营摊位）
         Stalls.update({ Stalls.id eq stallId }) {
             with(SqlExpressionBuilder) {
                 it.update(creditScore, creditScore - 10)
@@ -189,30 +221,49 @@ object PenaltyEffects {
             with(SqlExpressionBuilder) { it.update(creditScore, creditScore - 2) }
         }
         // 抽检频次：市场近 180 天确认处罚 >= 3 起 → HIGH
-        val confirmed = (Penalties innerJoin Stalls).selectAll().where {
+        val confirmed = Penalties.join(Stalls, JoinType.INNER, Penalties.stallId, Stalls.id)
+            .selectAll().where {
             (Stalls.marketId eq marketId) and (Penalties.status eq "CONFIRMED") and
                 (Penalties.confirmedAt greaterEq now.minusDays(180))
         }.count()
         if (confirmed >= 3) {
             Markets.update({ Markets.id eq marketId }) { it[inspectionLevel] = "HIGH" }
         }
-        // 公示
         val stallNo = stall[Stalls.stallNo]
         val market = Markets.selectAll().where { Markets.id eq marketId }.single()
+        // 分类公示：区分设备管理问题与经营行为问题，避免处罚对象模糊
+        val scaleRegStall = p[Penalties.scaleId]?.let { sid ->
+            Scales.selectAll().where { Scales.id eq sid }.singleOrNull()?.let { dev ->
+                Stalls.selectAll().where { Stalls.id eq dev[Scales.stallId] }.single()[Stalls.stallNo]
+            }
+        }
+        val (title, content) = if (kind == "DEVICE") {
+            "【设备管理问题】${market[Markets.name]} $stallNo 摊位设备管理责任公示" to
+                ("处罚类型：设备管理责任（电子秤封签/检定/维护管理不到位，由设备备案摊位承担）。" +
+                    "处罚事由：${p[Penalties.reason]}；罚款金额：${p[Penalties.amount]} 元。" +
+                    (if (p[Penalties.operatorStallId] != null) "本公示仅针对设备管理问题，相关经营短斤少两行为已另行认定公示。" else ""))
+        } else {
+            "【经营行为问题】${market[Markets.name]} $stallNo 摊位短斤少两处罚公示" to
+                ("处罚类型：经营短斤少两责任（由实际经营者承担）。处罚事由：${p[Penalties.reason]}；罚款金额：${p[Penalties.amount]} 元。" +
+                    (if (scaleRegStall != null && scaleRegStall != stallNo) "涉事电子秤备案摊位为 $scaleRegStall，经付款码、排班、交易时间、商品品类、监控备注认定实际经营摊位为 $stallNo。" else "") +
+                    (if (p[Penalties.splitGroup] != null) "本投诉责任已拆分：设备管理问题与经营行为问题分别记录、分别公示。" else ""))
+        }
         Disclosures.insert {
             it[Disclosures.marketId] = marketId; it[Disclosures.stallId] = stallId
             it[Disclosures.penaltyId] = penaltyId
-            it[title] = "${market[Markets.name]} $stallNo 摊位处罚公示"
-            it[content] = "处罚事由：${p[Penalties.reason]}；罚款金额：${p[Penalties.amount]} 元。"
+            it[Disclosures.kind] = kind
+            it[Disclosures.title] = title; it[Disclosures.content] = content
             it[publishedAt] = now
         }
-        // 关联投诉办结
+        // 关联投诉办结（仅经营责任处罚携带 complaintId）
         p[Penalties.complaintId]?.let { cid ->
             Complaints.update({ Complaints.id eq cid }) { it[status] = "RESOLVED" }
         }
         // 秤档案
         p[Penalties.scaleId]?.let { sid ->
-            Db.logEvent(sid, "PENALTY_CONFIRMED", "处罚确认：罚款 ${p[Penalties.amount]} 元，摊位信用 -10，市场信用 -2")
+            val typeLabel = if (kind == "DEVICE") "设备管理责任确认：罚款 ${p[Penalties.amount]} 元（备案摊位承担），摊位信用 -10，市场信用 -2"
+            else "经营短斤责任确认：罚款 ${p[Penalties.amount]} 元（实际经营者承担），摊位信用 -10，市场信用 -2"
+            Db.logEvent(sid, "PENALTY_CONFIRMED", typeLabel)
         }
     }
 }

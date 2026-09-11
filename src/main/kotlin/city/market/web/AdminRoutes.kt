@@ -221,8 +221,182 @@ fun Route.adminRoutes() {
         }
 
         get("/disclosures") { call.respondRedirect("/disclosures") }
+
+        // ---- 多人共用秤：排班与收款码管理 ----
+        get("/sharing") {
+            val s = call.requireRole(Roles.MARKET_ADMIN) ?: return@get
+            val scales = transaction {
+                (Scales innerJoin Stalls innerJoin Markets).selectAll().orderBy(Scales.id).map {
+                    Triple(it[Scales.id], it[Scales.deviceNo], "${it[Markets.name]} ${it[Stalls.stallNo]}（备案）")
+                }
+            }
+            val stalls = transaction {
+                (Stalls innerJoin Markets).selectAll().orderBy(Stalls.id)
+                    .map { it[Stalls.id] to "${it[Markets.name]} ${it[Stalls.stallNo]}（${it[Stalls.category]}）" }
+            }
+            val schedules = transaction {
+                ScaleSchedules
+                    .join(Scales, JoinType.INNER, ScaleSchedules.scaleId, Scales.id)
+                    .join(Stalls, JoinType.INNER, ScaleSchedules.stallId, Stalls.id)
+                    .selectAll()
+                    .orderBy(ScaleSchedules.scaleId to SortOrder.ASC, ScaleSchedules.startHour to SortOrder.ASC).map {
+                        SharingRow(
+                            it[ScaleSchedules.id], it[Scales.deviceNo], it[Stalls.stallNo],
+                            if (it[ScaleSchedules.slot] == "EVENING") "晚市" else "早市",
+                            it[ScaleSchedules.startHour], it[ScaleSchedules.endHour]
+                        )
+                    }
+            }
+            val codes = transaction {
+                (PaymentCodes innerJoin Stalls).selectAll().orderBy(PaymentCodes.id).map {
+                    PayCodeRow(it[PaymentCodes.id], it[Stalls.stallNo], it[PaymentCodes.prefix], it[PaymentCodes.channel])
+                }
+            }
+            call.respondHtml {
+                page("共用秤排班与收款码", s) {
+                    msgBox(call.request.queryParameters["msg"])
+                    div("card") {
+                        h1 { +"多人共用秤 · 早晚市排班与收款码" }
+                        p("muted") { +"相邻摊位高峰共用一台电子秤时，在此登记各摊位早/晚市班次和收款码前缀；投诉责任认定将按付款码、排班、交易时间、商品品类、监控备注判定实际经营者。" }
+                        h2 { +"当前排班" }
+                        if (schedules.isEmpty()) p("muted") { +"暂无共用排班" }
+                        else table {
+                            tr { th { +"设备" }; th { +"摊位" }; th { +"班次" }; th { +"时段" }; th { +"操作" } }
+                            schedules.forEach { r ->
+                                tr {
+                                    td { +r.device }; td { +r.stall }; td { +r.slot }
+                                    td { +"${r.startH}:00 - ${r.endH}:00" }
+                                    td {
+                                        form(method = FormMethod.post, action = "/admin/sharing/schedules/${r.id}/delete", classes = "inline") {
+                                            button(classes = "btn sm gray", type = ButtonType.submit) { +"删除" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        h2 { +"新增排班" }
+                        form(method = FormMethod.post, action = "/admin/sharing/schedules/new") {
+                            label { +"共用电子秤" }
+                            select { name = "scaleId"; scales.forEach { (id, dev, label) -> option { value = "$id"; +"$dev · $label" } } }
+                            label { +"使用摊位" }
+                            select { name = "stallId"; stalls.forEach { (id, l) -> option { value = "$id"; +l } } }
+                            label { +"班次" }
+                            select {
+                                name = "slot"
+                                option { value = "MORNING"; +"早市" }
+                                option { value = "EVENING"; +"晚市" }
+                            }
+                            label { +"开始/结束小时（24 小时制，结束小时不含）" }
+                            div {
+                                numberInput { name = "startHour"; value = "7"; attributes["min"] = "0"; attributes["max"] = "23" }
+                                numberInput { name = "endHour"; value = "9"; attributes["min"] = "1"; attributes["max"] = "24" }
+                            }
+                            button(classes = "btn", type = ButtonType.submit) { +"登记排班（自动标记共用秤）" }
+                        }
+                    }
+                    div("card") {
+                        h2 { +"摊位收款码前缀" }
+                        if (codes.isEmpty()) p("muted") { +"暂无收款码登记" }
+                        else table {
+                            tr { th { +"摊位" }; th { +"单号前缀" }; th { +"渠道" }; th { +"操作" } }
+                            codes.forEach { c ->
+                                tr {
+                                    td { +c.stall }; td { +c.prefix }; td { +c.channel }
+                                    td {
+                                        form(method = FormMethod.post, action = "/admin/sharing/codes/${c.id}/delete", classes = "inline") {
+                                            button(classes = "btn sm gray", type = ButtonType.submit) { +"删除" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        form(method = FormMethod.post, action = "/admin/sharing/codes/new") {
+                            label { +"摊位" }
+                            select { name = "stallId"; stalls.forEach { (id, l) -> option { value = "$id"; +l } } }
+                            label { +"付款单号前缀（如 ZFB-S5-）" }; textInput { name = "prefix"; required = true }
+                            label { +"收款渠道" }
+                            select {
+                                name = "channel"
+                                option { value = "WECHAT"; +"微信" }
+                                option { value = "ALIPAY"; +"支付宝" }
+                                option { value = "CASH"; +"现金/其他" }
+                            }
+                            button(classes = "btn", type = ButtonType.submit) { +"登记收款码" }
+                        }
+                    }
+                }
+            }
+        }
+
+        post("/sharing/schedules/new") {
+            call.requireRole(Roles.MARKET_ADMIN) ?: return@post
+            val p = call.receiveParameters()
+            val scaleId = p["scaleId"]?.toIntOrNull() ?: 0
+            val stallId = p["stallId"]?.toIntOrNull() ?: 0
+            val startH = (p["startHour"]?.toIntOrNull() ?: 0).coerceIn(0, 23)
+            val endH = (p["endHour"]?.toIntOrNull() ?: 0).coerceIn(1, 24)
+            if (scaleId == 0 || stallId == 0 || endH <= startH) {
+                call.respondRedirect("/admin/sharing?msg=" + enc("排班参数不完整或时段错误")); return@post
+            }
+            transaction {
+                val dup = ScaleSchedules.selectAll().where {
+                    (ScaleSchedules.scaleId eq scaleId) and (ScaleSchedules.stallId eq stallId)
+                }.any()
+                if (!dup) {
+                    ScaleSchedules.insert {
+                        it[ScaleSchedules.scaleId] = scaleId; it[ScaleSchedules.stallId] = stallId
+                        it[slot] = p["slot"] ?: "MORNING"; it[startHour] = startH; it[endHour] = endH
+                    }
+                }
+                // 排班摊位达到 2 个 → 自动标记为多人共用
+                val n = ScaleSchedules.selectAll().where { ScaleSchedules.scaleId eq scaleId }
+                    .map { it[ScaleSchedules.stallId] }.distinct().size
+                if (n >= 2) Scales.update({ Scales.id eq scaleId }) { it[shared] = true }
+            }
+            call.respondRedirect("/admin/sharing?msg=" + enc("排班已登记"))
+        }
+
+        post("/sharing/schedules/{id}/delete") {
+            call.requireRole(Roles.MARKET_ADMIN) ?: return@post
+            val id = call.parameters["id"]!!.toInt()
+            transaction {
+                val pred = with(org.jetbrains.exposed.sql.SqlExpressionBuilder) { ScaleSchedules.id eq id }
+                ScaleSchedules.deleteWhere { pred }
+            }
+            call.respondRedirect("/admin/sharing?msg=" + enc("排班已删除"))
+        }
+
+        post("/sharing/codes/new") {
+            call.requireRole(Roles.MARKET_ADMIN) ?: return@post
+            val p = call.receiveParameters()
+            val stallId = p["stallId"]?.toIntOrNull() ?: 0
+            val prefix = (p["prefix"] ?: "").trim()
+            if (stallId == 0 || prefix.isBlank()) {
+                call.respondRedirect("/admin/sharing?msg=" + enc("收款码参数不完整")); return@post
+            }
+            transaction {
+                PaymentCodes.insert {
+                    it[PaymentCodes.stallId] = stallId; it[PaymentCodes.prefix] = prefix
+                    it[channel] = p["channel"] ?: "WECHAT"
+                }
+            }
+            call.respondRedirect("/admin/sharing?msg=" + enc("收款码已登记"))
+        }
+
+        post("/sharing/codes/{id}/delete") {
+            call.requireRole(Roles.MARKET_ADMIN) ?: return@post
+            val id = call.parameters["id"]!!.toInt()
+            transaction {
+                val pred = with(org.jetbrains.exposed.sql.SqlExpressionBuilder) { PaymentCodes.id eq id }
+                PaymentCodes.deleteWhere { pred }
+            }
+            call.respondRedirect("/admin/sharing?msg=" + enc("收款码已删除"))
+        }
     }
 }
+
+private data class SharingRow(val id: Int, val device: String, val stall: String, val slot: String, val startH: Int, val endH: Int)
+private data class PayCodeRow(val id: Int, val stall: String, val prefix: String, val channel: String)
 
 data class ScaleRow(
     val id: Int, val deviceNo: String, val market: String, val stall: String, val category: String,

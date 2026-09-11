@@ -51,7 +51,7 @@ fun Route.vendorRoutes() {
                         .orderBy(Penalties.createdAt, SortOrder.DESC).limit(50).map {
                             VendorPenalty(
                                 it[Penalties.id], it[Penalties.reason], it[Penalties.amount].toPlainString(),
-                                it[Penalties.status], it[Penalties.createdAt].toString()
+                                it[Penalties.status], it[Penalties.createdAt].toString(), it[Penalties.kind]
                             )
                         }
             }
@@ -111,6 +111,8 @@ fun Route.vendorRoutes() {
                             div("card") {
                                 p {
                                     +"#${p.id} ｜ ${p.reason} ｜ 罚款 ¥${p.amount} ｜ "
+                                    badge(Labels.penaltyKind(p.kind), if (p.kind == "DEVICE") "b-yellow" else "b-green")
+                                    +" "
                                     badge(Labels.penalty(p.status), statusBadgeClass(p.status))
                                     +" ｜ ${p.time.take(16)}"
                                 }
@@ -186,4 +188,4 @@ data class VendorInspection(
     val id: Int, val device: String, val time: String, val standard: Int,
     val displayed: Int, val errorPct: String, val result: String, val confirmed: Boolean
 )
-data class VendorPenalty(val id: Int, val reason: String, val amount: String, val status: String, val time: String)
+data class VendorPenalty(val id: Int, val reason: String, val amount: String, val status: String, val time: String, val kind: String = "OPERATION")

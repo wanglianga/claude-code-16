@@ -52,11 +52,32 @@ object Scales : Table("scales") {
     override val primaryKey = PrimaryKey(id)
 }
 
+// ---------- 多人共用秤：摊位排班（相邻摊位早/晚市共用同一台秤） ----------
+object ScaleSchedules : Table("scale_schedules") {
+    val id = integer("id").autoIncrement()
+    val scaleId = integer("scale_id").references(Scales.id)
+    val stallId = integer("stall_id").references(Stalls.id)
+    val slot = varchar("slot", 10)                 // MORNING 早市 / EVENING 晚市
+    val startHour = integer("start_hour")          // 该班次开始小时（含）
+    val endHour = integer("end_hour")              // 该班次结束小时（不含）
+    override val primaryKey = PrimaryKey(id)
+}
+
+// ---------- 摊位收款付款码登记（投诉付款单号前缀归属判断） ----------
+object PaymentCodes : Table("payment_codes") {
+    val id = integer("id").autoIncrement()
+    val stallId = integer("stall_id").references(Stalls.id)
+    val prefix = varchar("prefix", 40)             // 付款单号/收款码前缀，如 WX-
+    val channel = varchar("channel", 20)           // WECHAT / ALIPAY / CASH
+    override val primaryKey = PrimaryKey(id)
+}
+
 // ---------- 交易流水（用于投诉匹配与峰值分析） ----------
 object Transactions : Table("transactions") {
     val id = long("id").autoIncrement()
     val scaleId = integer("scale_id").references(Scales.id)
     val stallId = integer("stall_id").references(Stalls.id)
+    val paymentPrefix = varchar("payment_prefix", 16).nullable() // 该笔交易收款码渠道（共用秤归属用）
     val ts = datetime("ts")
     val weightG = integer("weight_g")
     val amountYuan = decimal("amount", 10, 2)
@@ -136,11 +157,32 @@ object Complaints : Table("complaints") {
     val reweighedWeightG = integer("reweighed_weight_g") // 复称重量
     val paymentRef = varchar("payment_ref", 100).nullable() // 付款记录单号
     val photos = varchar("photos", 500).nullable()
-    val status = varchar("status", 20).default("SUBMITTED") // SUBMITTED/VERIFIED/REJECTED/RESOLVED/FOLLOWED_UP
+    val status = varchar("status", 20).default("SUBMITTED") // SUBMITTED/RESP_PENDING/VERIFIED/REJECTED/RESOLVED/FOLLOWED_UP
     val trustFlags = varchar("trust_flags", 500).nullable() // 交易可信度标记
     val matchedTxId = long("matched_tx_id").nullable()      // 匹配到的当天交易
     val shortfallG = integer("shortfall_g").nullable()      // 短少量
+    val operatorStallId = integer("operator_stall_id").references(Stalls.id).nullable() // 认定的实际经营摊位
+    val respCaseId = integer("resp_case_id").nullable()     // 关联责任认定单
     val createdAt = datetime("created_at")
+    override val primaryKey = PrimaryKey(id)
+}
+
+// ---------- 多人共用秤责任认定 ----------
+object RespCases : Table("resp_cases") {
+    val id = integer("id").autoIncrement()
+    val complaintId = integer("complaint_id").references(Complaints.id)
+    val scaleId = integer("scale_id").references(Scales.id)
+    val registeredStallId = integer("registered_stall_id").references(Stalls.id) // 设备备案摊位
+    val suggestedStallId = integer("suggested_stall_id").references(Stalls.id).nullable() // 引擎建议的实际经营摊位
+    val evidence = text("evidence")                       // 五类证据聚合明细（文本）
+    val monitorNote = text("monitor_note").nullable()      // 监控备注
+    val status = varchar("status", 16).default("PENDING") // PENDING / CONFIRMED / CANCELLED
+    val decidedStallId = integer("decided_stall_id").references(Stalls.id).nullable()  // 认定的实际经营摊位
+    val splitGroup = varchar("split_group", 24).nullable() // 拆分处罚组号
+    val deviceFault = bool("device_fault").default(false)  // 是否同时认定设备管理问题
+    val decidedBy = integer("decided_by").references(Users.id).nullable()
+    val createdAt = datetime("created_at")
+    val decidedAt = datetime("decided_at").nullable()
     override val primaryKey = PrimaryKey(id)
 }
 
@@ -153,6 +195,10 @@ object Penalties : Table("penalties") {
     val complaintId = integer("complaint_id").references(Complaints.id).nullable()
     val amount = decimal("amount", 10, 2) // 罚款金额
     val reason = varchar("reason", 500)
+    val kind = varchar("kind", 16).default("OPERATION")
+    // OPERATION 经营短斤责任 / DEVICE 设备管理责任
+    val operatorStallId = integer("operator_stall_id").references(Stalls.id).nullable() // 实际经营摊位（与备案摊位不同）
+    val splitGroup = varchar("split_group", 24).nullable() // 同一责任拆分的两个处罚同组
     val status = varchar("status", 20).default("ISSUED")
     // ISSUED / APPEALING / CONFIRMED / RECTIFYING / RECTIFIED / CLOSED / CANCELLED
     val issuedBy = integer("issued_by").references(Users.id)
@@ -201,6 +247,8 @@ object Disclosures : Table("disclosures") {
     val penaltyId = integer("penalty_id").references(Penalties.id).nullable()
     val title = varchar("title", 200)
     val content = text("content")
+    val kind = varchar("kind", 16).default("OPERATION")
+    // OPERATION 经营行为问题（短斤少两）/ DEVICE 设备管理问题（封签/检定/共用秤管理）
     val status = varchar("status", 20).default("PUBLISHED") // PUBLISHED / WITHDRAWN
     val publishedAt = datetime("published_at")
     override val primaryKey = PrimaryKey(id)
@@ -213,7 +261,8 @@ object ScaleEvents : Table("scale_events") {
     val eventType = varchar("event_type", 40)
     // REGISTERED / INSPECTION_PASS / INSPECTION_OVER / SUSPENDED / REACTIVATED /
     // COMPLAINT_VERIFIED / PENALTY_ISSUED / PENALTY_CONFIRMED / RECTIFICATION /
-    // REINSPECT_PASS / SEAL_CHANGED / FOLLOW_UP / CERT_UPDATED / OFFLINE / ONLINE
+    // REINSPECT_PASS / SEAL_CHANGED / FOLLOW_UP / CERT_UPDATED / OFFLINE / ONLINE /
+    // RESP_PENDING（责任待认定）/ RESP_SPLIT（责任拆分认定）
     val detail = text("detail")
     val createdAt = datetime("created_at")
     override val primaryKey = PrimaryKey(id)
@@ -232,7 +281,8 @@ object SealChanges : Table("seal_changes") {
 }
 
 val allTables = arrayOf(
-    Users, Markets, Stalls, Scales, Transactions, OfflineSyncs, InspectionTasks, Inspections,
-    Complaints, Penalties, Appeals, Rectifications, FollowUps, Disclosures,
+    Users, Markets, Stalls, Scales, ScaleSchedules, PaymentCodes, Transactions, OfflineSyncs,
+    InspectionTasks, Inspections,
+    Complaints, RespCases, Penalties, Appeals, Rectifications, FollowUps, Disclosures,
     ScaleEvents, SealChanges
 )

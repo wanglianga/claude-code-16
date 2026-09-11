@@ -116,6 +116,24 @@ object Db {
             logEvent(k3, "OFFLINE", "设备离线，交易离线缓存", now.minusDays(2))
             logEvent(k5, "REGISTERED", "摊位临时更换电子秤", now.minusDays(3))
 
+            // ---- 多人共用秤排班（DEV-0004：备案摊位 B-01 水果早市，相邻 B-02 禽蛋晚市共用） ----
+            fun schedule(scaleId: Int, stallId: Int, slot: String, sh: Int, eh: Int) =
+                ScaleSchedules.insert {
+                    it[ScaleSchedules.scaleId] = scaleId; it[ScaleSchedules.stallId] = stallId
+                    it[ScaleSchedules.slot] = slot; it[startHour] = sh; it[endHour] = eh
+                }
+            schedule(k4, s4, "MORNING", 7, 13)
+            schedule(k4, s5, "EVENING", 13, 19)
+            logEvent(k4, "REGISTERED", "早晚高峰共用秤排班：B-01 水果 07:00-13:00，B-02 禽蛋 13:00-19:00")
+
+            // ---- 摊位收款码前缀（责任认定：付款单号归属） ----
+            fun payCode(stallId: Int, prefix: String, channel: String) = PaymentCodes.insert {
+                it[PaymentCodes.stallId] = stallId; it[PaymentCodes.prefix] = prefix; it[PaymentCodes.channel] = channel
+            }
+            payCode(s1, "WX-S1-", "WECHAT"); payCode(s2, "WX-S2-", "WECHAT")
+            payCode(s3, "ZFB-S3-", "ALIPAY"); payCode(s4, "WX-S4-", "WECHAT")
+            payCode(s5, "ZFB-S5-", "ALIPAY"); payCode(s6, "ZFB-S6-", "ALIPAY")
+
             // ---- 交易流水（近 60 天） ----
             val unitPrice = mapOf(k1 to 36.0, k2 to 60.0, k3 to 8.0, k4 to 12.0, k5 to 16.0, k6 to 6.0)
             for (k in scaleIds) {
@@ -132,6 +150,21 @@ object Db {
                             it[offline] = (k == k3 && d < 2)
                         }
                     }
+                }
+            }
+
+            // ---- 共用秤晚市流水：DEV-0004 晚市由相邻 B-02 禽蛋摊位实际经营（流水记在 s5，收款渠道 ZFB-S5-） ----
+            val eggsPrice = 16.0
+            listOf(
+                Triple(1, 980, "18:05"), Triple(1, 1500, "18:22"), Triple(1, 1020, "18:40"),
+                Triple(2, 2000, "17:50")
+            ).forEach { (dAgo, w, hm) ->
+                val (h, m) = hm.split(":").map { it.toInt() }
+                Transactions.insert {
+                    it[scaleId] = k4; it[stallId] = s5; it[paymentPrefix] = "ZFB-S5-"
+                    it[ts] = now.minusDays(dAgo.toLong()).withHour(h).withMinute(m)
+                    it[weightG] = w
+                    it[amountYuan] = BigDecimal(w / 500.0 * eggsPrice).setScale(2, java.math.RoundingMode.HALF_UP)
                 }
             }
 
@@ -211,6 +244,18 @@ object Db {
                 it[trustFlags] = "SHARED_SCALE"; it[shortfallG] = 90
                 it[createdAt] = now.minusDays(5)
             }
+
+            // c4：晚市共用秤投诉（消费者指认 B-02 禽蛋摊位，晚市 18:20，付款码 ZFB-S5-），待核验→责任拆分演示
+            val c4Time = now.minusDays(1).withHour(18).withMinute(20)
+            val a4 = city.market.service.Trust.assess(s5, c4Time, 1000, 915)
+            val c4 = Complaints.insert {
+                it[consumerId] = c2; it[stallId] = s5; it[scaleId] = a4.scaleId
+                it[purchaseTime] = c4Time; it[product] = "土鸡蛋"
+                it[nominalWeightG] = 1000; it[reweighedWeightG] = 915
+                it[paymentRef] = "ZFB-S5-20260910-E188"; it[status] = "SUBMITTED"
+                it[trustFlags] = a4.flags.joinToString(","); it[matchedTxId] = a4.matchedTxId
+                it[shortfallG] = a4.shortfallG; it[createdAt] = now.minusDays(1).withHour(18).withMinute(35)
+            } get Complaints.id
 
             // c3：历史已办结 + 回访（用于“处罚后变化”对比：处罚前）
             val comp3 = Complaints.insert {

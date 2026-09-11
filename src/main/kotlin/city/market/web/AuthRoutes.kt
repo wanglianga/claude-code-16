@@ -87,6 +87,7 @@ fun Route.authRoutes() {
                     rows.forEach { d ->
                         div {
                             badge(if (d.status == "PUBLISHED") "公示中" else "已撤回", if (d.status == "PUBLISHED") "b-green" else "")
+                            badge(if (d.isDevice) "设备管理问题" else "经营行为问题", if (d.isDevice) "b-yellow" else "b-red")
                             h2 { +"${d.title}" }
                             p { +d.content }
                             p("muted") { +"${d.market} ｜ 公示时间：${d.time.take(16)}" }
@@ -99,4 +100,6 @@ fun Route.authRoutes() {
     }
 }
 
-data class DisclosureView(val id: Int, val market: String, val title: String, val content: String, val status: String, val time: String)
+data class DisclosureView(val id: Int, val market: String, val title: String, val content: String, val status: String, val time: String, val kind: String = "OPERATION") {
+    val isDevice get() = kind == "DEVICE"
+}

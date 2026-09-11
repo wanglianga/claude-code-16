@@ -30,9 +30,11 @@ object Labels {
     fun result(s: String) = mapOf("PASS" to "合格", "OVER_ERROR" to "误差超标")[s] ?: s
     fun seal(s: String) = mapOf("INTACT" to "完好", "BROKEN" to "破损", "REPLACED" to "已更换")[s] ?: s
     fun complaint(s: String) = mapOf(
-        "SUBMITTED" to "待核验", "VERIFIED" to "已核验", "REJECTED" to "已驳回",
+        "SUBMITTED" to "待核验", "RESP_PENDING" to "责任认定中", "VERIFIED" to "已核验", "REJECTED" to "已驳回",
         "RESOLVED" to "已办结", "FOLLOWED_UP" to "已回访"
     )[s] ?: s
+    fun penaltyKind(s: String) = if (s == "DEVICE") "设备管理责任" else "经营短斤责任"
+    fun respStatus(s: String) = mapOf("PENDING" to "待认定", "CONFIRMED" to "已认定拆分", "CANCELLED" to "已撤销")[s] ?: s
     fun penalty(s: String) = mapOf(
         "ISSUED" to "已开出", "APPEALING" to "申诉中", "CONFIRMED" to "已确认",
         "RECTIFYING" to "整改中", "RECTIFIED" to "已整改", "CLOSED" to "已结案", "CANCELLED" to "已撤销"
@@ -50,7 +52,8 @@ object Labels {
         "REINSPECT_PASS" to "复检通过", "SEAL_CHANGED" to "封签更换", "FOLLOW_UP" to "投诉回访",
         "OFFLINE" to "设备离线", "ONLINE" to "恢复联网",
         "OFFLINE_SYNC" to "离线补传", "OFFLINE_ANOMALY" to "离线异常",
-        "MANUAL_REVIEW" to "人工复核", "REINSPECT_SUGGESTED" to "建议补做抽检"
+        "MANUAL_REVIEW" to "人工复核", "REINSPECT_SUGGESTED" to "建议补做抽检",
+        "RESP_PENDING" to "责任待认定", "RESP_SPLIT" to "责任拆分认定"
     )[s] ?: s
 }
 
@@ -102,6 +105,7 @@ fun HTML.page(title: String, session: UserSession?, content: DIV.() -> Unit) {
                 .stat .n.b-red{color:#a11;background:none;padding:0}
                 .muted{color:#778;font-size:12px}
                 form.inline{display:inline}
+                pre.evidence{background:#f7f8f9;border:1px solid #e2e6ea;border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;margin:6px 0;line-height:1.5}
                 """.trimIndent()
             }
         }
@@ -113,12 +117,14 @@ fun HTML.page(title: String, session: UserSession?, content: DIV.() -> Unit) {
                 when (session.role) {
                     Roles.MARKET_ADMIN -> {
                         a(href = "/admin/scales") { +"电子秤台账" }
+                        a(href = "/admin/sharing") { +"共用秤排班" }
                         a(href = "/admin/stalls") { +"摊位管理" }
                     }
                     Roles.REGULATOR -> {
                         a(href = "/reg/dashboard") { +"工作台" }
                         a(href = "/reg/tasks") { +"抽检任务" }
                         a(href = "/reg/complaints") { +"投诉核验" }
+                        a(href = "/reg/responsibility") { +"责任认定" }
                         a(href = "/reg/penalties") { +"处罚管理" }
                         a(href = "/reg/offline") { +"离线复核" }
                         a(href = "/reg/disclosures") { +"公示管理" }

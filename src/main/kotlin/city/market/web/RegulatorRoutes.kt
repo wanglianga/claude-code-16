@@ -4,6 +4,7 @@ import city.market.auth.Roles
 import city.market.auth.UserSession
 import city.market.db.*
 import city.market.service.PenaltyEffects
+import city.market.service.Responsibility
 import city.market.service.Rules
 import city.market.service.TaskGenerator
 import city.market.service.Trust
@@ -41,7 +42,8 @@ fun Route.regulatorRoutes() {
                     "rectifying" to Penalties.selectAll().where { Penalties.status eq "RECTIFYING" }.count(),
                     "offlineReview" to OfflineSyncs.selectAll().where {
                         (OfflineSyncs.status eq "SYNCED") and (OfflineSyncs.pendingReview greater 0)
-                    }.count()
+                    }.count(),
+                    "pendingResp" to RespCases.selectAll().where { RespCases.status eq "PENDING" }.count()
                 )
             }
             val markets = transaction {
@@ -60,6 +62,7 @@ fun Route.regulatorRoutes() {
                         statCard("待处理申诉", "${stats["pendingAppeals"]}", stats["pendingAppeals"]!! > 0)
                         statCard("整改中", "${stats["rectifying"]}")
                         statCard("待复核补传", "${stats["offlineReview"]}", stats["offlineReview"]!! > 0)
+                        statCard("共用秤责任待认定", "${stats["pendingResp"]}", stats["pendingResp"]!! > 0)
                     }
                     div("card") {
                         h2 { +"市场信用与抽检频次" }
@@ -227,7 +230,8 @@ fun Route.regulatorRoutes() {
                             it[Complaints.product], it[Complaints.purchaseTime].toString(),
                             it[Complaints.nominalWeightG], it[Complaints.reweighedWeightG], it[Complaints.shortfallG],
                             it[Complaints.paymentRef], it[Complaints.status], it[Complaints.trustFlags],
-                            it[Complaints.matchedTxId], it[Complaints.scaleId], it[Complaints.photos]
+                            it[Complaints.matchedTxId], it[Complaints.scaleId], it[Complaints.photos],
+                            it[Complaints.respCaseId]
                         )
                     }
             }
@@ -255,6 +259,12 @@ fun Route.regulatorRoutes() {
                                     }
                                 }
                                 r.photo?.let { p { a(href = "/uploads/$it", target = "_blank") { +"查看现场照片" } } }
+                                if (r.status == "RESP_PENDING") {
+                                    p { badge("多人共用秤，实际经营者待认定", "b-yellow") }
+                                    r.respCaseId?.let {
+                                        p { a(href = "/reg/responsibility/$it", classes = "btn sm") { +"前往责任认定 #$it" } }
+                                    }
+                                }
                                 if (r.status == "SUBMITTED") {
                                     form(method = FormMethod.post, action = "/reg/complaints/${r.id}/verify", classes = "inline") {
                                         button(classes = "btn sm", type = ButtonType.submit) { +"核验属实（生成处罚）" }
@@ -280,6 +290,19 @@ fun Route.regulatorRoutes() {
         post("/complaints/{id}/verify") {
             val s = call.requireRole(Roles.REGULATOR) ?: return@post
             val id = call.parameters["id"]!!.toInt()
+            val sharedScaleId = transaction {
+                Complaints.selectAll().where { Complaints.id eq id }.single()[Complaints.scaleId]
+            }
+            // 多人共用秤：实际经营者可能不是设备备案摊位时，责任明确前不落处罚，先责任认定
+            if (sharedScaleId != null && Responsibility.isSharedScale(sharedScaleId)) {
+                val a = Responsibility.assess(id)
+                val clearRegistered = a.suggestedStallId != null && a.suggestedStallId == a.registeredStallId
+                if (!clearRegistered) {
+                    val caseId = Responsibility.openCase(id)
+                    call.respondRedirect("/reg/responsibility/$caseId?msg=" + enc("该秤为多人共用，已按付款码/排班/时间/品类/监控生成责任认定"))
+                    return@post
+                }
+            }
             transaction {
                 val c = Complaints.selectAll().where { Complaints.id eq id }.single()
                 val shortfall = c[Complaints.shortfallG] ?: 0
@@ -325,15 +348,168 @@ fun Route.regulatorRoutes() {
             call.respondRedirect("/reg/complaints?msg=" + enc("回访已登记"))
         }
 
+        // ---------------- 共用秤责任认定 ----------------
+        get("/responsibility") {
+            val s = call.requireRole(Roles.REGULATOR) ?: return@get
+            val rows = transaction {
+                RespCases
+                    .join(Complaints, JoinType.INNER, RespCases.complaintId, Complaints.id)
+                    .join(Scales, JoinType.INNER, RespCases.scaleId, Scales.id)
+                    .selectAll()
+                    .orderBy(RespCases.createdAt, SortOrder.DESC).limit(100).map {
+                        RespCaseRow(
+                            it[RespCases.id], it[Scales.deviceNo], it[Complaints.product],
+                            it[Complaints.purchaseTime].toString(), it[RespCases.status],
+                            it[RespCases.registeredStallId], it[RespCases.suggestedStallId],
+                            it[RespCases.deviceFault]
+                        )
+                    }
+            }
+            val stallName = { sid: Int ->
+                transaction {
+                    val st = (Stalls innerJoin Markets).selectAll().where { Stalls.id eq sid }.single()
+                    "${st[Markets.name]} ${st[Stalls.stallNo]}"
+                }
+            }
+            call.respondHtml {
+                page("共用秤责任认定", s) {
+                    msgBox(call.request.queryParameters["msg"])
+                    div("card") {
+                        h1 { +"多人共用秤 · 责任认定" }
+                        p("muted") { +"早晚高峰相邻摊位共用一台电子秤时，投诉先按付款码、摊位排班、交易时间、商品品类、监控备注认定实际经营者；责任明确前处罚不落备案摊位，认定后设备管理责任与经营短斤责任分别记录。" }
+                        if (rows.isEmpty()) p("muted") { +"暂无责任认定单" }
+                        table {
+                            tr { th { +"#" }; th { +"设备" }; th { +"商品/购买时间" }; th { +"备案摊位" }; th { +"建议实际经营者" }; th { +"状态" }; th { +"操作" } }
+                            rows.forEach { r ->
+                                tr {
+                                    td { +"${r.id}" }; td { +r.device }
+                                    td { +"${r.product} ${r.time.take(16)}" }
+                                    td { +stallName(r.regStall) }
+                                    td { +(r.suggested?.let { stallName(it) } ?: if (r.status == "PENDING") "证据冲突，需人工判定" else "—") }
+                                    td {
+                                        badge(Labels.respStatus(r.status), if (r.status == "PENDING") "b-yellow" else "b-green")
+                                        if (r.deviceFault) badge("含设备责任", "b-red")
+                                    }
+                                    td { a(href = "/reg/responsibility/${r.id}", classes = "btn sm") { +"查看/认定" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        get("/responsibility/{id}") {
+            val s = call.requireRole(Roles.REGULATOR) ?: return@get
+            val id = call.parameters["id"]!!.toInt()
+            val cs = transaction { RespCases.selectAll().where { RespCases.id eq id }.singleOrNull() }
+                ?: run { call.respondRedirect("/reg/responsibility?msg=" + enc("责任单不存在")); return@get }
+            // 重新跑一次引擎（可带入已存监控备注），展示最新证据
+            val a = Responsibility.assess(cs[RespCases.complaintId], cs[RespCases.monitorNote])
+            val complaint = transaction {
+                (Complaints innerJoin Users).selectAll().where { Complaints.id eq cs[RespCases.complaintId] }.single()
+            }
+            call.respondHtml {
+                page("责任认定 #$id", s) {
+                    msgBox(call.request.queryParameters["msg"])
+                    div("card") {
+                        h1 { +"共用秤责任认定 #$id "; badge(Labels.respStatus(cs[RespCases.status]), if (cs[RespCases.status] == "PENDING") "b-yellow" else "b-green") }
+                        p {
+                            +"投诉 #${cs[RespCases.complaintId]}（${complaint[Users.displayName]}）：${complaint[Complaints.product]}，标称 ${complaint[Complaints.nominalWeightG]}g / 复称 ${complaint[Complaints.reweighedWeightG]}g，短少 ${complaint[Complaints.shortfallG] ?: "-"}g"
+                        }
+                        p("muted") { +"付款单号：${complaint[Complaints.paymentRef] ?: "未提供"} ｜ 购买时间：${complaint[Complaints.purchaseTime].toString().replace('T', ' ')}" }
+                    }
+                    div("card") {
+                        h2 { +"证据聚合（付款码 / 摊位排班 / 交易时间 / 商品品类 / 监控备注）" }
+                        pre("evidence") { +a.evidenceText }
+                        if (a.deviceReasons.isNotEmpty()) {
+                            p { badge("设备管理风险", "b-red"); +" ${a.deviceReasons.joinToString("；")}" }
+                        }
+                    }
+                    if (cs[RespCases.status] == "PENDING") {
+                        div("card") {
+                            h2 { +"认定结论" }
+                            form(method = FormMethod.post, action = "/reg/responsibility/$id/decide") {
+                                label { +"实际经营摊位" }
+                                select {
+                                    name = "operatorStallId"
+                                    a.candidates.forEach { cand ->
+                                        option {
+                                            value = "${cand.stallId}"
+                                            if (cand.stallId == (a.suggestedStallId ?: a.registeredStallId)) selected = true
+                                            +"${cand.label}（证据分 ${cand.score}${if (cand.registered) "，备案摊位" else ""}）"
+                                        }
+                                    }
+                                }
+                                label {
+                                    checkBoxInput { name = "deviceFault" }
+                                    +" 同时认定设备管理责任（封签/检定/维护问题由备案摊位承担）"
+                                }
+                                label { +"监控备注（可补充视频巡查情况，重新参与证据判定）" }
+                                textArea {
+                                    name = "monitorNote"; rows = "3"
+                                    cs[RespCases.monitorNote]?.let { +it }
+                                    placeholder = "例如：晚市监控显示该时段为 B-02 摊位使用本秤称重收款"
+                                }
+                                button(classes = "btn", type = ButtonType.submit) { +"确认认定并拆分处罚" }
+                            }
+                            form(method = FormMethod.post, action = "/reg/responsibility/$id/reject", classes = "inline") {
+                                button(classes = "btn sm gray", type = ButtonType.submit) { +"投诉不成立，驳回" }
+                            }
+                            p("muted") { +"提交后将分别生成「经营短斤责任」（实际经营摊位）与「设备管理责任」（备案摊位，可选）两条处罚，公示分别归类；确认处罚前不会扣减信用。" }
+                        }
+                    } else {
+                        val decided = transaction {
+                            val ops = Penalties.join(Stalls, JoinType.INNER, Penalties.stallId, Stalls.id).selectAll()
+                                .where { Penalties.splitGroup eq "RSP-$id" }.orderBy(Penalties.kind).map {
+                                    "${Labels.penaltyKind(it[Penalties.kind])} → ${it[Stalls.stallNo]} 摊位，¥${it[Penalties.amount]}，${Labels.penalty(it[Penalties.status])}"
+                                }
+                            ops
+                        }
+                        div("card") {
+                            h2 { +"已拆分处罚记录" }
+                            if (decided.isEmpty()) p("muted") { +"无（投诉已驳回）" }
+                            decided.forEach { p { badge("责任拆分", "b-green"); +" $it" } }
+                        }
+                    }
+                }
+            }
+        }
+
+        post("/responsibility/{id}/decide") {
+            val s = call.requireRole(Roles.REGULATOR) ?: return@post
+            val id = call.parameters["id"]!!.toInt()
+            val p = call.receiveParameters()
+            val operatorStallId = p["operatorStallId"]?.toIntOrNull()
+            if (operatorStallId == null) {
+                call.respondRedirect("/reg/responsibility/$id?msg=" + enc("请选择实际经营摊位")); return@post
+            }
+            val (opPid, devPid) = Responsibility.decide(
+                id, s.userId, operatorStallId, p["deviceFault"] != null, p["monitorNote"]
+            )
+            call.respondRedirect(
+                "/reg/penalties?msg=" + enc("责任已拆分：经营短斤处罚 #$opPid" + (devPid?.let { "，设备管理处罚 #$it" } ?: "") + "，请在处罚管理中确认生效")
+            )
+        }
+
+        post("/responsibility/{id}/reject") {
+            call.requireRole(Roles.REGULATOR) ?: return@post
+            val id = call.parameters["id"]!!.toInt()
+            Responsibility.reject(id)
+            call.respondRedirect("/reg/complaints?msg=" + enc("责任认定单 #$id 已驳回，投诉不成立"))
+        }
+
         // ---------------- 处罚管理 ----------------
         get("/penalties") {
             val s = call.requireRole(Roles.REGULATOR) ?: return@get
             val rows = transaction {
-                (Penalties innerJoin Stalls).selectAll().orderBy(Penalties.createdAt, SortOrder.DESC).limit(100).map {
+                Penalties.join(Stalls, JoinType.INNER, Penalties.stallId, Stalls.id)
+                    .selectAll().orderBy(Penalties.createdAt, SortOrder.DESC).limit(100).map {
                     PenaltyRow(
                         it[Penalties.id], it[Stalls.stallNo], it[Penalties.scaleId],
                         it[Penalties.amount].toPlainString(), it[Penalties.reason], it[Penalties.status],
-                        it[Penalties.createdAt].toString(), it[Penalties.complaintId], it[Penalties.inspectionId]
+                        it[Penalties.createdAt].toString(), it[Penalties.complaintId], it[Penalties.inspectionId],
+                        it[Penalties.kind], it[Penalties.splitGroup]
                     )
                 }
             }
@@ -348,16 +524,20 @@ fun Route.regulatorRoutes() {
                     div("card") {
                         h1 { +"处罚记录" }
                         table {
-                            tr { th { +"#" }; th { +"摊位" }; th { +"事由" }; th { +"罚款" }; th { +"来源" }; th { +"状态" }; th { +"操作" } }
+                            tr { th { +"#" }; th { +"责任摊位" }; th { +"责任类型" }; th { +"事由" }; th { +"罚款" }; th { +"来源" }; th { +"状态" }; th { +"操作" } }
                             rows.forEach { r ->
                                 tr {
-                                    td { +"${r.id}" }; td { +r.stall }; td { +r.reason }; td { +"¥${r.amount}" }
+                                    td { +"${r.id}" }; td { +r.stall }
+                                    td { badge(Labels.penaltyKind(r.kind), if (r.kind == "DEVICE") "b-yellow" else "b-green") }
+                                    td { +r.reason }; td { +"¥${r.amount}" }
                                     td { +if (r.complaintId != null) "投诉#${r.complaintId}" else if (r.inspectionId != null) "抽检#${r.inspectionId}" else "手动" }
                                     td { badge(Labels.penalty(r.status), statusBadgeClass(r.status)) }
                                     td {
                                         if (r.status == "ISSUED") {
                                             form(method = FormMethod.post, action = "/reg/penalties/${r.id}/confirm", classes = "inline") {
-                                                button(classes = "btn sm", type = ButtonType.submit) { +"确认生效" }
+                                                button(classes = "btn sm", type = ButtonType.submit) {
+                                                    +if (r.splitGroup != null) "确认生效（同组一并确认）" else "确认生效"
+                                                }
                                             }
                                         }
                                     }
@@ -426,7 +606,7 @@ fun Route.regulatorRoutes() {
             val rows = transaction {
                 (Disclosures innerJoin Markets).selectAll()
                     .orderBy(Disclosures.publishedAt, SortOrder.DESC).limit(100).map {
-                        DisclosureView(it[Disclosures.id], it[Markets.name], it[Disclosures.title], it[Disclosures.content], it[Disclosures.status], it[Disclosures.publishedAt].toString())
+                        DisclosureView(it[Disclosures.id], it[Markets.name], it[Disclosures.title], it[Disclosures.content], it[Disclosures.status], it[Disclosures.publishedAt].toString(), it[Disclosures.kind])
                     }
             }
             call.respondHtml {
@@ -436,7 +616,11 @@ fun Route.regulatorRoutes() {
                         h1 { +"公示管理" }
                         rows.forEach { d ->
                             div("card") {
-                                h2 { +"${d.title} "; badge(Labels.disclosure(d.status), if (d.status == "PUBLISHED") "b-green" else "") }
+                                h2 {
+                                    +"${d.title} "
+                                    badge(if (d.isDevice) "设备管理问题" else "经营行为问题", if (d.isDevice) "b-yellow" else "b-red")
+                                    badge(Labels.disclosure(d.status), if (d.status == "PUBLISHED") "b-green" else "")
+                                }
                                 p { +d.content }
                                 p("muted") { +"${d.market} ｜ ${d.time.take(16)}" }
                                 if (d.status == "PUBLISHED") {
@@ -490,6 +674,15 @@ fun Route.regulatorRoutes() {
                         Triple(it[SealChanges.reason], it[SealChanges.newSealPhoto], it[SealChanges.createdAt].toString())
                     }
             }
+            val schedules = transaction {
+                (ScaleSchedules innerJoin Stalls).selectAll().where { ScaleSchedules.scaleId eq id }
+                    .orderBy(ScaleSchedules.startHour).map {
+                        val reg = it[Stalls.id] == scale[Stalls.id]
+                        "${it[Stalls.stallNo]}（${if (reg) "设备备案摊位" else "相邻共用摊位"}）：" +
+                            (if (it[ScaleSchedules.slot] == "EVENING") "晚市" else "早市") +
+                            " ${it[ScaleSchedules.startHour]}:00-${it[ScaleSchedules.endHour]}:00"
+                    }
+            }
             call.respondHtml {
                 page("秤监管档案", s) {
                     div("card") {
@@ -504,6 +697,13 @@ fun Route.regulatorRoutes() {
                             +" 绑定时间：${scale[Scales.boundAt].toString().take(16)}"
                         }
                         scale[Scales.sealPhoto]?.let { p { a(href = "/uploads/$it", target = "_blank") { +"查看当前封签照片" } } }
+                    }
+                    if (schedules.isNotEmpty()) {
+                        div("card") {
+                            h2 { +"多人共用排班" }
+                            schedules.forEach { p { badge("共用班次", "b-yellow"); +" $it" } }
+                            p("muted") { +"投诉发生后按付款码、排班、交易时间、商品品类、监控备注认定实际经营者，责任明确前处罚不落备案摊位。" }
+                        }
                     }
                     div("card") {
                         h2 { +"抽检记录" }
@@ -634,13 +834,18 @@ data class RegComplaintRow(
     val id: Int, val consumer: String, val market: String, val stall: String, val product: String,
     val time: String, val nominal: Int, val reweighed: Int, val shortfall: Int?,
     val paymentRef: String?, val status: String, val flags: String?, val matchedTx: Long?,
-    val scaleId: Int?, val photo: String?
+    val scaleId: Int?, val photo: String?, val respCaseId: Int?
 )
 data class PenaltyRow(
     val id: Int, val stall: String, val scaleId: Int?, val amount: String, val reason: String,
-    val status: String, val time: String, val complaintId: Int?, val inspectionId: Int?
+    val status: String, val time: String, val complaintId: Int?, val inspectionId: Int?,
+    val kind: String = "OPERATION", val splitGroup: String? = null
 )
 data class AppealRow(val id: Int, val penaltyId: Int, val content: String, val time: String)
+data class RespCaseRow(
+    val id: Int, val device: String, val product: String, val time: String, val status: String,
+    val regStall: Int, val suggested: Int?, val deviceFault: Boolean
+)
 data class InspectionRow(
     val time: String, val kind: String, val standard: Int, val displayed: Int,
     val errorG: Int, val errorPct: String, val seal: String, val result: String, val confirmed: Boolean
